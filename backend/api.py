@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -57,12 +58,14 @@ def _summarizer():
 
 @app.on_event("startup")
 def _warmup():
-    """Start the patient-wide contradiction check in the background so the first request is fast."""
+    """Compute contradictions (rules + AI) before serving, so no request sees a half-loaded screen."""
     fn = _summarizer()
+    for p in get_corpus().patients.values():
+        get_contradictions(p.patient_id)
     if fn:
         mod = importlib.import_module("backend.ai")
-        for p in get_corpus().patients.values():
-            mod.warmup(p, llm_context(p))
+        with ThreadPoolExecutor() as ex:
+            list(ex.map(lambda p: mod.warmup(p, llm_context(p)), get_corpus().patients.values()))
 
 
 @app.get("/api/health")
@@ -70,7 +73,9 @@ def health():
     c = get_corpus()
     return {"ok": True, "data_dir": str(c.data_dir),
             "patients": {pid: len(p.documents) for pid, p in c.patients.items()},
-            "summarizer": "ai" if _summarizer() else "mock"}
+            "summarizer": "ai" if _summarizer() else "mock",
+            "ai_contradictions": {pid: importlib.import_module("backend.ai").contradictions_status(pid)
+                                  for pid in c.patients} if _summarizer() else None}
 
 
 @app.get("/api/patients")
