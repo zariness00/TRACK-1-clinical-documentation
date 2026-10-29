@@ -1,0 +1,1 @@
+{"scores": [{"name": "Body-Mass-Index", "unit": "kg/m2", "values": [{"id": "s1", "value": "22", "documentIds": ["99990001"]}, {"id": "s2", "value": "27", "documentIds": ["99990001"]}]}, {"name": "Körpergröße", "unit": "m", "values": [{"id": "s3", "value": "1,65", "documentIds": ["99990001"]}]}]}

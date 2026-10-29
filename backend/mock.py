@@ -67,17 +67,5 @@ def mock_summarize(patient: Patient, role: str, task: str, per_category: int = 2
             out.facts.append(CandidateFact(
                 category=c, label=f"[MOCK] {label}", value=p.text[:200],
                 sources=[CandidateSource(doc_id=p.doc_id, passage_id=p.id, quote=p.text)]))
-    # one mock contradiction so the UI has something to render: same topic, two documents
-    hits = [h for h in idx.search("BMI", k=10) if h[1].kind != "heading"]
-    docs_seen, claims = set(), []
-    for _, p in hits:
-        if p.doc_id not in docs_seen:
-            docs_seen.add(p.doc_id)
-            claims.append(CandidateClaim(statement=p.text[:120],
-                                         source=CandidateSource(doc_id=p.doc_id, quote=p.text)))
-        if len(claims) == 2:
-            break
-    if len(claims) == 2:
-        out.contradictions.append(CandidateContradiction(
-            category="vitals_body", summary="[MOCK] Body measurements differ between documents", claims=claims))
+    # contradictions come from backend/contradictions.py (rules), merged in /api/summary
     return out
