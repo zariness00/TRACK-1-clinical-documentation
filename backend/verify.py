@@ -54,7 +54,7 @@ def _find_in_doc(doc: Document, part: str, from_raw: int = 0) -> tuple[str, int,
     """Find one quote fragment. Returns (level, raw_start, raw_end, n_occurrences)."""
     if not part:
         return None
-    i = doc.text.find(part, from_raw)
+    i = _find_bounded(doc.text, part, from_raw)
     if i >= 0:
         return "exact", i, i + len(part), doc.text.count(part)
     for level, cf in (("normalized", False), ("caseless", True)):
@@ -64,10 +64,32 @@ def _find_in_doc(doc: Document, part: str, from_raw: int = 0) -> tuple[str, int,
             continue
         # translate from_raw into normalised coordinates
         nstart = next((k for k, r in enumerate(imap) if r >= from_raw), len(imap))
-        j = ntext.find(q, nstart)
+        j = _find_bounded(ntext, q, nstart)
         if j >= 0:
             return level, imap[j], imap[j + len(q) - 1] + 1, ntext.count(q)
     return None
+
+
+def _number_boundary_ok(text: str, s: int, e: int) -> bool:
+    """A quote must not cut a number in half: 'BMI: 29' must not match inside 'BMI: 29.4',
+    '100 mg' must not match inside '1100 mg'."""
+    q = text[s:e]
+    if q and q[-1].isdigit() and e < len(text):
+        nxt = text[e]
+        if nxt.isdigit() or (nxt in ".," and e + 1 < len(text) and text[e + 1].isdigit()):
+            return False
+    if q and q[0].isdigit() and s > 0:
+        prv = text[s - 1]
+        if prv.isdigit() or (prv in ".," and s > 1 and text[s - 2].isdigit()):
+            return False
+    return True
+
+
+def _find_bounded(text: str, q: str, start: int = 0) -> int:
+    i = text.find(q, start)
+    while i >= 0 and not _number_boundary_ok(text, i, i + len(q)):
+        i = text.find(q, i + 1)
+    return i
 
 
 _LEVEL_RANK = {"exact": 0, "normalized": 1, "caseless": 2}
@@ -105,10 +127,18 @@ def resolve_doc(patient: Patient, doc_id: str | None) -> Document | None:
 def verify_quote(patient: Patient, doc_id: str | None, quote: str) -> VerifyResult:
     quote = (quote or "").strip()
     base = dict(cited_doc_id=doc_id, quote=quote)
+    cited = resolve_doc(patient, doc_id)
     if len(normalize(quote)) < MIN_QUOTE_CHARS:
+        # a short quote is accepted only when it is a WHOLE line of the cited document
+        # (one-word diagnoses such as "SLE" or "HLP"); never searched in other documents
+        if cited:
+            nq = normalize(quote)
+            for p in cited.passages:
+                if p.kind != "heading" and normalize(p.text) == nq:
+                    return VerifyResult(True, "exact", cited.doc_id, spans=[Span(p.start, p.end, p.text)],
+                                        passage_ids=[p.id], n_occurrences=1, **base)
         return VerifyResult(False, "too_short", None, **base)
 
-    cited = resolve_doc(patient, doc_id)
     order = ([cited] if cited else []) + [d for d in patient.documents.values() if d is not cited]
 
     for doc in order:

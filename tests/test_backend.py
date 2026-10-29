@@ -148,3 +148,52 @@ def test_api_end_to_end():
 
     r2 = c.post("/api/summary", json={"role": "Oncologist", "task": "tumour board"}).json()
     assert "tumour_biology" in r2["categories"] and r2["categories"] != r["categories"]
+
+
+# ---------- guards added after the failure-case review ----------
+def _facts(pat, *items):
+    cand = CandidateOutput.model_validate({"facts": [
+        {"category": "x", "label": v, "value": v, "sources": [{"doc_id": "99990001", "quote": q}]} for v, q in items]})
+    facts, _, _, rejected = validate(pat, cand)
+    return [f.value for f in facts], {r.item.split(": ", 1)[1]: r.reason for r in rejected if r.kind == "fact"}
+
+
+def test_number_boundary(pat):
+    r = verify_quote(pat, "99990001", "BMI: 22")         # must hit "BMI: 22", not "BMI: 22.4"
+    d = pat.documents["99990001"]
+    assert r.ok and d.text[r.spans[0].end] != "."
+    assert not verify_quote(pat, "brief_2015-03", "Gewicht 7").ok   # "7" is half of "70"
+
+
+def test_short_whole_line_quote(pat):
+    assert verify_quote(pat, "99990001", "HLP").ok                 # whole line -> citable
+    assert verify_quote(pat, "brief_2015-03", "HLP").status == "too_short"   # not searched elsewhere
+
+
+def test_negation_polarity_certainty(pat):
+    ok, rej = _facts(pat,
+        ("Enlarged axillary lymph nodes", "axillär keine vergrößerten Lymphknoten"),
+        ("No enlarged axillary lymph nodes", "axillär keine vergrößerten Lymphknoten"),
+        ("HER2 positive", "Her2neu-Expression: negativ"),
+        ("HER2 negative", "Her2neu-Expression: negativ"),
+        ("Test carcinoma, right", "Vd.a. Testkarzinom re."),
+        ("Suspected test carcinoma, right", "Vd.a. Testkarzinom re."),
+        ("No allergies", "Nussallergie (Exanthem)"),
+        ("Type 2 diabetes", "Diabetes mellitus Typ II"),
+        ("Hyperlipidaemia", "HLP"),
+    )
+    assert ok == ["No enlarged axillary lymph nodes", "HER2 negative", "Suspected test carcinoma, right",
+                  "Type 2 diabetes", "Hyperlipidaemia"]
+    assert rej["Enlarged axillary lymph nodes"] == "negation mismatch"
+    assert rej["HER2 positive"] == "positive/negative mismatch"
+    assert rej["Test carcinoma, right"].startswith("source says suspected")
+    assert rej["No allergies"] == "negation mismatch"
+
+
+def test_not_documented_is_checked(pat):
+    cand = CandidateOutput.model_validate({"not_documented": [
+        {"category": "allergies", "item": "Allergies"},
+        {"category": "lifestyle", "item": "Smoking status", "searched": ["Nikotin", "Raucher"]}]})
+    _, _, kept, rejected = validate(pat, cand)
+    assert [m.item for m in kept] == ["Smoking status"]
+    assert any(r.kind == "missing" and r.reason.startswith("documented in") for r in rejected)

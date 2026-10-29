@@ -6,18 +6,21 @@ pip install -r requirements.txt
 # data/ is git-ignored. Put it at ./data or point DATA_DIR at it:
 export DATA_DIR=/path/to/TRACK-1-clinical-documentation/data
 python scripts/inspect_data.py          # check the 8 documents split well
-python -m pytest -q tests               # 14 tests on synthetic fixtures (no real data needed)
+python -m pytest -q tests               # 18 tests on synthetic fixtures (no real data needed)
 uvicorn backend.api:app --reload --port 8000   # http://localhost:8000/docs
 ```
 
 ## What it does
 1. **Ingestion (start-up, cached in memory).** `corpus.py` loads `data/patient-*/documents/*.json` (Track-1 format: `metadata` + `text` with `<BR>` breaks; `doc_id` = `metadata.id`, title/date/type/department/admission from metadata; also txt/html/pdf) and the IBM extraction `*.json` files next to `documents/`. The IBM files are only hints: where they differ from the documents, the documents win.
 2. **Segmentation.** `segment.py` splits each document into citable **passages**: one per line (each diagnosis, `Größe: 170 cm` field and medication row is its own passage), with prose that wraps mid-sentence re-joined and multi-sentence lines split into sentences. Each passage has an ID of the form `<doc_id>#p<n>` and exact raw offsets, so `text[start:end] == passage.text` always holds. It handles German abbreviations (Dr., z. B., Z. n., geb., Mon.), date and ordinal dots, and tab/pipe/space-aligned tables.
-3. **Quote verification.** `verify.py` matches a quote at one of these levels: `exact` → `normalized` (whitespace, „typographic“ quotes, dashes, soft hyphens, words hyphenated across a line break) → `caseless`. If the quote is found in a different document from the one cited, the status is `wrong_doc` and the citation is auto-corrected. Otherwise the quote is **rejected**. Ellipsis quotes (`A ... B`) are supported. Quotes shorter than 5 characters are rejected as ambiguous (so `BMI: 29` is still citable).
+3. **Quote verification.** `verify.py` matches a quote at one of these levels: `exact` → `normalized` (whitespace, „typographic“ quotes, dashes, soft hyphens, words hyphenated across a line break) → `caseless`. If the quote is found in a different document from the one cited, the status is `wrong_doc` and the citation is auto-corrected. Otherwise the quote is **rejected**. Ellipsis quotes (`A ... B`) are supported. Quotes shorter than 5 characters are accepted only when they are a whole line of the cited document (e.g. `SLE`). A quote never cuts a number in half: `BMI: 29` doesn't match inside `BMI: 29.4`.
 4. **Validation guards.** `validate.py` checks every model claim before the UI sees it:
    - `quote`: the quote must be found.
    - `numbers`: every number in the displayed value must appear in a quote. This catches wrong doses and dates. Values marked `derived` (calculated) are exempt.
    - `laterality`: left/right in the value must match links/rechts in the source.
+   - `polarity` / `negation`: "HER2 positive" can't come from "negativ", and "enlarged nodes" can't come from "keine vergrößerten Lymphknoten".
+   - `certainty`: "Vd.a." (suspected) can't be shown as a confirmed diagnosis.
+   - "Not documented" claims are dropped when the passages do contain that information.
    - Contradictions need at least 2 verified passages at different places.
 
    Anything that fails goes to `rejected[]` with a reason, which is useful for metrics.
