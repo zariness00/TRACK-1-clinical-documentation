@@ -6,21 +6,37 @@ pip install -r requirements.txt
 # data/ is git-ignored. Put it at ./data or point DATA_DIR at it:
 export DATA_DIR=/path/to/TRACK-1-clinical-documentation/data
 python scripts/inspect_data.py          # check the 8 documents split well
-python -m pytest -q tests               # 14 tests on synthetic fixtures (no real data needed)
+python scripts/compare_ibm.py           # IBM extraction vs. documents -> ibm_vs_documents.md (don't commit)
+python scripts/show_pool.py             # verified fact pool built from IBM's extraction
+python -m pytest -q tests               # 26 tests on synthetic fixtures (no real data needed)
 uvicorn backend.api:app --reload --port 8000   # http://localhost:8000/docs
 ```
 
 ## What it does
 1. **Ingestion (start-up, cached in memory).** `corpus.py` loads `data/patient-*/documents/*.json` (Track-1 format: `metadata` + `text` with `<BR>` breaks; `doc_id` = `metadata.id`, title/date/type/department/admission from metadata; also txt/html/pdf) and the IBM extraction `*.json` files next to `documents/`. The IBM files are only hints: where they differ from the documents, the documents win.
 2. **Segmentation.** `segment.py` splits each document into citable **passages**: one per line (each diagnosis, `Größe: 170 cm` field and medication row is its own passage), with prose that wraps mid-sentence re-joined and multi-sentence lines split into sentences. Each passage has an ID of the form `<doc_id>#p<n>` and exact raw offsets, so `text[start:end] == passage.text` always holds. It handles German abbreviations (Dr., z. B., Z. n., geb., Mon.), date and ordinal dots, and tab/pipe/space-aligned tables.
-3. **Quote verification.** `verify.py` matches a quote at one of these levels: `exact` → `normalized` (whitespace, „typographic“ quotes, dashes, soft hyphens, words hyphenated across a line break) → `caseless`. If the quote is found in a different document from the one cited, the status is `wrong_doc` and the citation is auto-corrected. Otherwise the quote is **rejected**. Ellipsis quotes (`A ... B`) are supported. Quotes shorter than 5 characters are rejected as ambiguous (so `BMI: 29` is still citable).
+3. **Quote verification.** `verify.py` matches a quote at one of these levels: `exact` → `normalized` (whitespace, „typographic“ quotes, dashes, soft hyphens, words hyphenated across a line break) → `caseless`. If the quote is found in a different document from the one cited, the status is `wrong_doc` and the citation is auto-corrected. Otherwise the quote is **rejected**. Ellipsis quotes (`A ... B`) are supported. Quotes shorter than 5 characters are accepted only when they are a whole line of the cited document (e.g. `SLE`). A quote never cuts a number in half: `BMI: 29` doesn't match inside `BMI: 29.4`.
 4. **Validation guards.** `validate.py` checks every model claim before the UI sees it:
    - `quote`: the quote must be found.
    - `numbers`: every number in the displayed value must appear in a quote. This catches wrong doses and dates. Values marked `derived` (calculated) are exempt.
    - `laterality`: left/right in the value must match links/rechts in the source.
+   - `polarity` / `negation`: "HER2 positive" can't come from "negativ", and "enlarged nodes" can't come from "keine vergrößerten Lymphknoten".
+   - `certainty`: "Vd.a." (suspected) or a question ("Fragestellung: Carotisstenose?") can't be shown as a confirmed finding.
+   - "Not documented" claims are dropped when the passages do contain that information.
    - Contradictions need at least 2 verified passages at different places.
 
    Anything that fails goes to `rejected[]` with a reason, which is useful for metrics.
+
+5. **Verified fact pool (`ibm_pool.py`, `GET /api/patients/{pid}/facts`).** IBM's extraction is used as candidates, never as truth. Each entry is linked to the exact passage that contains it in the cited document (or the one it really appears in), or dropped if it isn't there. Its status is re-read from the document's wording (question `…?` / suspected `Vd.a., suspekt` / negated `keine …`), with IBM's status kept for comparison. Allergies come from the documents' own lines, which are more specific than IBM's coded concept. Measurements are linked to the line holding the value. The pool is built once at start-up; `?as_context=true` gives one prompt line per fact (`[F12] diagnosis: … [suspected] — "…" (doc, date)`) so the live AI call only has to select fact IDs.
+
+6. **Contradictions (`contradictions.py`, `GET /api/patients/{pid}/contradictions`).** Conservative rules, run once at start-up and verified like AI output:
+   - BMI vs weight/height² in the same letter (tolerance 1 kg/m²)
+   - two dates for the same admission/discharge in one letter
+   - the same finding (organ + %) recorded as left and as right
+   - a finding stated as present in one passage and absent ("keine …") in another (confidence `medium`)
+   - a pathology report's sampling date vs the date of the section in another document that says the same procedure was performed (confidence `medium`)
+
+   Not flagged on purpose: small measurement differences, changes over time, clinical questions. On the real documents this gives 6 contradictions and 0 false alarms. `/api/summary` always includes them (`origin: "rules"`) and drops AI contradictions that cite the same passages.
 
 ## Contract (`backend/models.py`)
 - **AI (Zarina):** create `backend/ai.py` with `summarize(patient, role, task, context: str) -> CandidateOutput | dict`. `context` is all documents with passage IDs (`GET /context`). Each source cites `{doc_id, passage_id?, quote}`, with the quote copied verbatim in German. While `backend/ai.py` doesn't exist (or with `MOCK=1`), `/api/summary` uses the keyword mock, which runs through the same validator.

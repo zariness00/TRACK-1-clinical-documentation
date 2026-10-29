@@ -7,3 +7,4 @@ bench_out/
 .env
 .env.*
 !.env.example
+ibm_vs_documents.md

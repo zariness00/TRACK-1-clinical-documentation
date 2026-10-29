@@ -6,12 +6,15 @@ from __future__ import annotations
 import importlib
 import os
 import time
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .context import llm_context
+from .contradictions import find_contradictions
+from .ibm_pool import Pool, build_pool, pool_context
 from .corpus import get_corpus
 from .mock import mock_summarize
 from .models import CandidateOutput, SummaryRequest, SummaryResponse
@@ -23,6 +26,8 @@ app = FastAPI(title="Track 1 — Clinical documentation backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _indexes: dict[str, PassageIndex] = {}
+_pools: dict[str, Pool] = {}
+_contras: dict[str, list] = {}
 
 
 def _patient(pid: str):
@@ -90,7 +95,7 @@ def document(pid: str, doc_id: str):
 
 
 @app.get("/api/patients/{pid}/passages")
-def passages(pid: str, q: str | None = None, doc_id: str | None = None, k: int = Query(20, le=500)):
+def passages(pid: str, q: Optional[str] = None, doc_id: Optional[str] = None, k: int = Query(20, le=500)):
     p = _patient(pid)
     if q:
         return [{"score": round(s, 3), **ps.to_dict()} for s, ps in _index(pid).search(q, k, doc_id)]
@@ -104,6 +109,52 @@ def context(pid: str):
     return {"context": llm_context(_patient(pid))}
 
 
+def get_pool(pid: str) -> Pool:
+    if pid not in _pools:
+        _pools[pid] = build_pool(_patient(pid))
+    return _pools[pid]
+
+
+def get_contradictions(pid: str):
+    """Rule-based contradictions, computed once per patient and verified like AI output."""
+    if pid not in _contras:
+        p = _patient(pid)
+        _, cs, _, _ = validate(p, CandidateOutput(contradictions=find_contradictions(p)))
+        _contras[pid] = cs
+    return _contras[pid]
+
+
+@app.get("/api/patients/{pid}/contradictions")
+def contradictions(pid: str):
+    return [c.model_dump() for c in get_contradictions(pid)]
+
+
+def _merge_contradictions(rule_cs, other_cs):
+    """Rule results first; drop AI/mock contradictions that cite the same passages."""
+    seen = [{(cl.source.doc_id, pid) for cl in c.claims for pid in cl.source.passage_ids} for c in rule_cs]
+    out = list(rule_cs)
+    for c in other_cs:
+        keys = {(cl.source.doc_id, pid) for cl in c.claims for pid in cl.source.passage_ids}
+        if not any(len(keys & k) >= 2 for k in seen):
+            out.append(c)
+            seen.append(keys)
+    for i, c in enumerate(out):
+        c.id = f"c{i}"
+    return out
+
+
+@app.get("/api/patients/{pid}/facts")
+def facts(pid: str, kind: Optional[str] = None, status: Optional[str] = None, as_context: bool = False):
+    """Verified fact pool built from IBM's extraction: every fact linked to its passage,
+    status read from the document wording, IBM entries not in the documents dropped.
+    `as_context=true` returns one prompt line per fact for the AI to select from."""
+    pool = get_pool(pid)
+    fs = [f for f in pool.facts if (not kind or f.kind == kind) and (not status or f.status == status)]
+    if as_context:
+        return {"context": pool_context(Pool(fs, [], {}))}
+    return {"stats": pool.stats, "facts": [f.to_dict() for f in fs], "dropped": pool.dropped}
+
+
 @app.get("/api/patients/{pid}/extractions")
 def extractions(pid: str):
     """IBM JSON files — hints only. Where they differ from the documents, documents win."""
@@ -112,7 +163,7 @@ def extractions(pid: str):
 
 class VerifyIn(BaseModel):
     patient_id: str = "0000-0001"
-    doc_id: str | None = None
+    doc_id: Optional[str] = None
     quote: str
 
 
@@ -149,6 +200,7 @@ def summary(req: SummaryRequest):
         cand = mock_summarize(p, role, task)
     t1 = time.perf_counter()
     facts, contras, missing, rejected = validate(p, cand)
+    contras = _merge_contradictions(get_contradictions(p.patient_id), contras)
     t2 = time.perf_counter()
     stages = getattr(importlib.import_module("backend.ai"), "last_timings", {}) if fn else {}
     return SummaryResponse(

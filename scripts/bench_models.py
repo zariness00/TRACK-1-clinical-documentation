@@ -553,7 +553,7 @@ def selftest(patient, sits, expected, gold) -> None:
     for s in sits:
         cand = CandidateOutput(facts=[f for sid, f in perfect if sid == s["id"]], contradictions=gold_contras if s["id"] == "1" else [])
         if s["id"] == "5":
-            cand.not_documented.append(CandidateMissing(category="follow_up", item="Record of the follow-up carotid duplex ultrasound"))
+            cand.not_documented.append(CandidateMissing(category="follow_up", item="No record that the follow-up carotid duplex ultrasound took place"))
         for target, c in ((recs, cand), (mock_recs, mock_summarize(patient, "", s["text"]))):
             f, k, m, rj = validate(patient, c)
             target.append({"situation": s["id"], "candidate": c.model_dump(), "pre": {"facts": f, "contras": k},
