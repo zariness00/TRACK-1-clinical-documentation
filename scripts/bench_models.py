@@ -621,12 +621,17 @@ def smoke(models: list[str], meta: dict) -> None:
 def app_eval(patient, ctx, sits, expected, gold) -> None:
     """Score backend/ai.py end to end (what /api/summary serves). First call is cold (no contradiction cache)."""
     from backend import ai
+    from backend.api import _merge_contradictions, get_contradictions
+    t = time.perf_counter()
+    print(f"warm-up (as at server start): AI contradictions ready={ai.warmup(patient, ctx)} "
+          f"in {time.perf_counter() - t:.1f}s", flush=True)
     recs = []
     for s in sits:
         t0 = time.perf_counter()
         cand = ai.summarize(patient, "", s["text"], ctx)
-        dt = time.perf_counter() - t0
         f, k, m, rj = validate(patient, cand)
+        k = _merge_contradictions(get_contradictions(patient.patient_id), k)    # same as /api/summary
+        dt = time.perf_counter() - t0
         recs.append({"situation": s["id"], "candidate": cand.model_dump(), "pre": {"facts": f, "contras": k},
                      "post": {"facts": f, "contras": k}, "missing": m, "rejected": rj,
                      "verifier_dropped": {"facts": [], "contras": []}})
