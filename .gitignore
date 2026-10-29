@@ -2,3 +2,8 @@
 __pycache__/
 
 data/
+bench_out/
+.venv/
+.env
+.env.*
+!.env.example

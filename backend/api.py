@@ -44,9 +44,20 @@ def _summarizer():
     if os.environ.get("MOCK") == "1":
         return None
     try:
-        return importlib.import_module("backend.ai").summarize
+        mod = importlib.import_module("backend.ai")
     except ModuleNotFoundError:
         return None
+    return mod.summarize if getattr(mod, "ENABLED", True) else None
+
+
+@app.on_event("startup")
+def _warmup():
+    """Start the patient-wide contradiction check in the background so the first request is fast."""
+    fn = _summarizer()
+    if fn:
+        mod = importlib.import_module("backend.ai")
+        for p in get_corpus().patients.values():
+            mod.warmup(p, llm_context(p))
 
 
 @app.get("/api/health")
@@ -139,10 +150,12 @@ def summary(req: SummaryRequest):
     t1 = time.perf_counter()
     facts, contras, missing, rejected = validate(p, cand)
     t2 = time.perf_counter()
+    stages = getattr(importlib.import_module("backend.ai"), "last_timings", {}) if fn else {}
     return SummaryResponse(
         patient_id=p.patient_id, patient_name=p.name, role=role, task=task,
         categories=cand.categories, facts=facts, not_documented=missing,
         contradictions=contras, rejected=rejected, mock=fn is None,
         timings_ms={"model": round((t1 - t0) * 1000, 1), "validate": round((t2 - t1) * 1000, 1),
-                    "total": round((t2 - t0) * 1000, 1)},
+                    "total": round((t2 - t0) * 1000, 1),
+                    **{f"ai_{k}": round(v * 1000, 1) for k, v in stages.items()}},
     )
