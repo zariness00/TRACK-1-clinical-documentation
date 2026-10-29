@@ -6,6 +6,7 @@ or rejects them. Gregor renders only `SummaryResponse`.
 """
 from __future__ import annotations
 
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -14,13 +15,13 @@ class SummaryRequest(BaseModel):
     patient_id: str = "0000-0001"
     role: str = Field("", examples=["Anaesthetist"])
     task: str = Field("", examples=["Pre-operative check before breast surgery"])
-    situation: str | None = Field(None, description="Free text (title + description). Used if role/task empty.")
+    situation: Optional[str] = Field(None, description="Free text (title + description). Used if role/task empty.")
 
 
 # ---------- what the model is allowed to return ----------
 class CandidateSource(BaseModel):
-    doc_id: str | None = None
-    passage_id: str | None = None      # e.g. "doc3#p12" — optional, helps disambiguate
+    doc_id: Optional[str] = None
+    passage_id: Optional[str] = None      # e.g. "doc3#p12" — optional, helps disambiguate
     quote: str                         # verbatim from the document (German)
 
 
@@ -28,7 +29,7 @@ class CandidateFact(BaseModel):
     category: str                      # from the planner's category list, e.g. "anticoagulation"
     label: str                         # short English label, e.g. "Blood thinner"
     value: str                         # English, e.g. "ASS 100 mg 1-0-0"
-    date: str | None = None            # ISO date of the fact if known
+    date: Optional[str] = None            # ISO date of the fact if known
     derived: bool = False              # true for calculated values (weight change, BMI recomputed)
     sources: list[CandidateSource]
 
@@ -61,7 +62,7 @@ class CandidateOutput(BaseModel):
 class Source(BaseModel):
     doc_id: str
     doc_title: str
-    doc_date: str | None
+    doc_date: Optional[str]
     quote: str                         # exact raw text of the span(s)
     start: int                         # raw char offsets in GET /documents/{doc_id} text
     end: int
@@ -75,7 +76,7 @@ class Fact(BaseModel):
     category: str
     label: str
     value: str
-    date: str | None = None
+    date: Optional[str] = None
     derived: bool = False
     sources: list[Source]
     checks: list[str] = []             # which guards passed, e.g. ["quote", "numbers", "laterality"]

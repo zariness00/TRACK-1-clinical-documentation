@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from typing import Optional
 import time
 
 from fastapi import FastAPI, HTTPException, Query
@@ -79,7 +80,7 @@ def document(pid: str, doc_id: str):
 
 
 @app.get("/api/patients/{pid}/passages")
-def passages(pid: str, q: str | None = None, doc_id: str | None = None, k: int = Query(20, le=500)):
+def passages(pid: str, q: Optional[str] = None, doc_id: Optional[str] = None, k: int = Query(20, le=500)):
     p = _patient(pid)
     if q:
         return [{"score": round(s, 3), **ps.to_dict()} for s, ps in _index(pid).search(q, k, doc_id)]
@@ -101,7 +102,7 @@ def extractions(pid: str):
 
 class VerifyIn(BaseModel):
     patient_id: str = "0000-0001"
-    doc_id: str | None = None
+    doc_id: Optional[str] = None
     quote: str
 
 
