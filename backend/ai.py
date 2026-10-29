@@ -23,6 +23,7 @@ import httpx
 from .corpus import Patient
 from .models import (CandidateClaim, CandidateContradiction, CandidateFact, CandidateMissing,
                      CandidateOutput, CandidateSource)
+from .validate import certainty_ok, laterality_ok, negation_ok, numbers_ok, polarity_ok
 from .verify import verify_quote
 
 log = logging.getLogger("backend.ai")
@@ -54,10 +55,11 @@ VERIFY = os.environ.get("LLM_VERIFY", "0") == "1"
 # (background, cached per patient) keeps bounded reasoning.
 REASONING = {r: os.environ.get(f"LLM_REASONING_{r.upper()}", d) for r, d in
              {"planner": "off", "summary": "off", "missing": "off", "contras": "medium", "verifier": "off"}.items()}
-PLANNER_TIMEOUT_S = float(os.environ.get("LLM_PLANNER_TIMEOUT_S", "3"))
-WORKER_TIMEOUT_S = float(os.environ.get("LLM_WORKER_TIMEOUT_S", "8"))
+PLANNER_TIMEOUT_S = float(os.environ.get("LLM_PLANNER_TIMEOUT_S", "2.5"))
+BUDGET_S = float(os.environ.get("LLM_BUDGET_S", "9"))          # hard end-to-end budget for one request
+WORKER_TIMEOUT_S = BUDGET_S - 0.5
 CONTRA_TIMEOUT_S = float(os.environ.get("LLM_CONTRA_TIMEOUT_S", "90"))
-MAX_TOKENS = {"plan": 800, "summary": 4000, "missing": 4000, "contras": 8000, "verify": 1500}
+MAX_TOKENS = {"plan": 600, "summary": 3000, "missing": 2500, "contras": 8000, "verify": 1500}
 TODAY = "15 April 2016"
 
 _pool = ThreadPoolExecutor(8)
@@ -172,8 +174,12 @@ Today is {TODAY} (date of the latest document). Search ALL documents for each in
 - Do NOT put dates in value (the date field and the source document show them), unless the date is the answer
   itself (e.g. date of a planned operation) and is in the quote.
 - date: ISO yyyy-mm-dd of the finding if known, else "". derived: true only for values you calculated (e.g. weight change).
-- Every number in value must appear in the quotes unless derived is true.
+- Every number in value must appear in the quotes unless derived is true. Write left/right only if the quote
+  says it (links/rechts/li./re.). Split compound answers into separate facts that are each fully supported by
+  their own quote (e.g. "previous episode: ..." and "cause found: ..." as two facts).
 - For current status ("does she take"), use the latest document that mentions it and give its date.
+- Be brief: at most 3 facts per need, one source per fact unless the value combines passages, and quote only the
+  relevant words (about 10-120 characters), not whole paragraphs.
 - {CITE}
 Return JSON only: {{"facts": [{{"need_id", "label", "value", "date", "derived", "sources": [{{"doc_id", "passage_id", "quote"}}]}}]}}"""
 
@@ -183,18 +189,27 @@ documents of one patient (latest document {TODAY}). Search all documents, includ
 For every need return: need_id (e.g. "n3"), documented (true/false), searched (at most 3 German terms you checked),
 and if documented: label, value (short English answer, no dates, every number must be in the quote) and ONE source
 with the evidence; if not documented: label = exactly what is missing, specific (e.g. "No record that the carotid
-duplex follow-up took place"), value = "", sources = []. Only mark documented when you can quote the evidence.
-Keep it short.
+duplex follow-up took place"), value = "", sources = []. Only mark documented when you can quote the evidence; the
+value must be fully supported by that one quote. If a need covers several items (e.g. each recommended follow-up),
+return one entry per item with the same need_id. Keep it short.
 - {CITE}
 Return JSON only: {{"needs": [{{"need_id", "documented", "searched", "label", "value", "sources": [{{"doc_id", "passage_id", "quote"}}]}}]}}"""
 
 CONTRA_SYS = f"""You check the German clinical documents of one patient for genuine contradictions: two or more passages
-that cannot all be true, e.g. two different dates for the same event, left vs right for the same finding, a BMI that
-does not match the height and weight in the same document, a finding stated as present in one place and absent in
-another, a wrong case number or impossible date.
+that cannot all be true. Work through these checks systematically, across ALL documents:
+1. Dates: for every event (admission, discharge, examination, biopsy/sampling, surgery, report), compare every date
+   given for that SAME event, within a document and across documents (e.g. "Aufnahme am" vs "... aufgenommen";
+   a sampling date vs the date of the examination in which the sample was taken). Also impossible dates.
+2. Findings: the same finding stated as present in one passage and absent ("kein", "keine", "ohne") in another,
+   when both refer to the same time period / work-up.
+3. Laterality: the same finding (same organ, same degree) recorded as left in one passage and right in another.
+4. Calculated values: a stated value that does not match its components in the same document (e.g. BMI vs height
+   and weight, totals).
+5. Identifiers: a case number or ID that belongs to a different stay.
 NOT contradictions: small measurement differences (e.g. 170 vs 171 cm), values that changed over time (weight, BMI or
-doses between visits or stays), different wording or level of detail. Check the dates before calling something a
-contradiction. Check the whole record. Report only contradictions you are confident about.
+doses between visits or stays), a plan vs what happened later, different wording or level of detail, questions
+("Fragestellung: ...?"). Check the dates of both passages before calling something a contradiction.
+Report only contradictions you are confident about.
 Each contradiction: category, summary (one English sentence naming the conflicting values), claims (2 or more),
 each with statement (English) and source. Every claim cites exactly ONE passage (one bracket ID, never a range) and
 quotes only from that passage; claims must cite different passages (e.g. a BMI mismatch = separate claims for the
@@ -216,34 +231,80 @@ def _params(role: str) -> dict:
     return {"reasoning_effort": effort}
 
 
+def _salvage(c: str):
+    """Recover a truncated JSON object: cut after the last complete element and close open brackets."""
+    for end in [m.end() for m in re.finditer(r"[}\]]", c)][::-1][:200]:
+        stack, in_str, esc = [], False, False
+        for ch in c[:end]:
+            if in_str:
+                esc, in_str = (not esc and ch == "\\"), in_str and not (ch == '"' and not esc)
+            elif ch == '"':
+                in_str = True
+            elif ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+            elif ch in "}]" and stack:
+                stack.pop()
+        if not in_str:
+            try:
+                return json.loads(c[:end] + "".join(reversed(stack)), strict=False)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
 def _parse(content: str):
     c = re.sub(r"(?s)<think>.*?</think>", "", content or "").strip()
     c = re.sub(r"^```(?:json)?\s*|\s*```$", "", c)
-    try:
-        return json.loads(c)
-    except json.JSONDecodeError:
-        i, j = c.find("{"), c.rfind("}")
-        return json.loads(c[i:j + 1]) if 0 <= i < j else None
+    i, j = c.find("{"), c.rfind("}")
+    for cand in (c, c[i:j + 1] if 0 <= i < j else ""):
+        try:
+            return json.loads(cand, strict=False)      # strict=False: raw tabs/newlines from table quotes
+        except json.JSONDecodeError:
+            pass
+    return _salvage(c[i:]) if i >= 0 else None
 
 
-def _chat(role: str, schema: str, system: str, user: str, timeout: float):
+SHARED_SYS = ("You are a clinical documentation assistant. You read the German clinical documents of one patient "
+              "and answer strictly from them, in JSON.")
+
+
+def _chat(role: str, schema: str, system: str, user: str, timeout: float, docs: str | None = None):
+    """With `docs`, every worker sends the same prefix (shared system prompt + documents) so the provider's
+    prompt cache can reuse it; the worker-specific instructions follow the documents."""
     model = MODELS[role]
-    body = {"model": model, "temperature": 0.2, "max_tokens": MAX_TOKENS[schema],
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+    messages = ([{"role": "system", "content": SHARED_SYS},
+                 {"role": "user", "content": f"{docs}\n\n=== INSTRUCTIONS ===\n{system}\n\n{user}"}] if docs else
+                [{"role": "system", "content": system}, {"role": "user", "content": user}])
+    body = {"model": model, "temperature": 0.2, "max_tokens": MAX_TOKENS[schema], "messages": messages,
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": schema, "strict": True, "schema": SCHEMAS[schema]}},
             **_params(role)}
-    t0 = time.perf_counter()
+    # Streamed: at the deadline we stop reading and keep every complete element received so far
+    # (a slow worker degrades to a partial answer instead of an empty one).
+    t0, parts, complete = time.perf_counter(), [], False
+    deadline = t0 + timeout
     try:
-        r = _http.post(f"{BASE_URL}/chat/completions", json=body, timeout=timeout,
-                       headers={"Authorization": f"Bearer {KEY}"})
-        r.raise_for_status()
-        data = _parse(r.json()["choices"][0]["message"].get("content") or "")
-        log.info("%s (%s) %.2fs", role, model, time.perf_counter() - t0)
-        return data if isinstance(data, dict) else None
-    except (httpx.HTTPError, KeyError, ValueError) as e:
-        log.warning("%s (%s) failed after %.2fs: %s", role, model, time.perf_counter() - t0, type(e).__name__)
-        return None
+        with _http.stream("POST", f"{BASE_URL}/chat/completions", json=body | {"stream": True},
+                          timeout=httpx.Timeout(timeout), headers={"Authorization": f"Bearer {KEY}"}) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if line.startswith("data:"):
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        complete = True
+                        break
+                    choices = json.loads(payload).get("choices") or [{}]
+                    parts.append((choices[0].get("delta") or {}).get("content") or "")
+                if time.perf_counter() > deadline:
+                    break
+    except (httpx.HTTPError, ValueError) as e:
+        if not parts:
+            log.warning("%s (%s) failed after %.2fs: %s", role, model, time.perf_counter() - t0, type(e).__name__)
+            return None
+    data = _parse("".join(parts))
+    log.log(logging.INFO if complete else logging.WARNING, "%s (%s) %.2fs%s", role, model,
+            time.perf_counter() - t0, "" if complete else " (deadline: partial output kept)")
+    return data if isinstance(data, dict) else None
 
 
 # ---------------------------------------------------------------- evidence helpers
@@ -270,14 +331,24 @@ def _sources(patient: Patient, raw) -> list[CandidateSource]:
 
 _ABSENT = re.compile(r"\b(not (documented|specified|recorded|mentioned|found|available|provided|given)|"
                      r"no (documentation|record|data|information|details)|unknown|"
-                     r"no\b[^.;]*\b(documented|recorded|on record|found|performed))\b", re.I)
+                     r"no\b[^.;]*\b(documented|documentation|record|recorded|on record|found|performed))\b", re.I)
+
+
+def _guards_ok(value: str, derived: bool, quotes: list[str]) -> bool:
+    """Same guards validate.py applies later, so a fact that would be rejected doesn't block a better one."""
+    return ((derived or numbers_ok(value, quotes)) and laterality_ok(value, quotes) and polarity_ok(value, quotes)
+            and negation_ok(value, quotes) and certainty_ok(value, quotes))
 
 
 def _fact(patient: Patient, f: dict, category: str) -> CandidateFact | None:
     srcs = _sources(patient, f.get("sources"))
-    if not srcs or not str(f.get("value") or "").strip() or _ABSENT.search(str(f["value"])):
+    value = str(f.get("value") or "").strip()
+    if not srcs or not value or _ABSENT.search(value):
         return None                                     # absence is reported via not_documented, never as a fact
-    return CandidateFact(category=category, label=str(f.get("label") or category), value=str(f["value"]),
+    quotes = [" … ".join(s.text for s in verify_quote(patient, s.doc_id, s.quote).spans) for s in srcs]
+    if not _guards_ok(value, bool(f.get("derived")), quotes):
+        return None
+    return CandidateFact(category=category, label=str(f.get("label") or category), value=value,
                          date=str(f.get("date") or "") or None, derived=bool(f.get("derived")), sources=srcs)
 
 
@@ -287,7 +358,7 @@ def _spans(f: CandidateFact) -> set:
 
 # ---------------------------------------------------------------- contradictions (patient-wide, cached)
 def _contradictions(patient: Patient, context: str) -> list[CandidateContradiction]:
-    data = _chat("contras", "contras", CONTRA_SYS, context, CONTRA_TIMEOUT_S) or {}
+    data = _chat("contras", "contras", CONTRA_SYS, "", CONTRA_TIMEOUT_S, docs=context) or {}
     out, seen = [], set()
     for c in data.get("contradictions") or []:
         if not isinstance(c, dict):
@@ -309,10 +380,12 @@ def _contradictions(patient: Patient, context: str) -> list[CandidateContradicti
         if len(claims) >= 2 and key not in seen:           # needs >= 2 verified, distinct passages
             seen.add(key)
             out.append(CandidateContradiction(category=str(c.get("category") or "general"),
-                                              summary=str(c.get("summary") or ""), claims=claims))
-    if data:
-        return out
-    raise RuntimeError("contradiction worker failed")
+                                              summary=str(c.get("summary") or ""), claims=claims, origin="ai"))
+    if not data:
+        raise RuntimeError("contradiction worker failed")
+    if out:     # semantic check runs once per patient (cached), so it costs no request time
+        _, out = _verify([], out, "Patient-wide contradiction check", timeout=CONTRA_TIMEOUT_S)
+    return out
 
 
 def contradictions_future(patient: Patient, context: str) -> Future:
@@ -323,10 +396,23 @@ def contradictions_future(patient: Patient, context: str) -> Future:
         return fut
 
 
-def warmup(patient: Patient, context: str) -> None:
-    """Start the patient-wide contradiction check in the background (call at start-up)."""
-    if ENABLED:
-        contradictions_future(patient, context)
+def warmup(patient: Patient, context: str, wait: bool = True) -> bool:
+    """Run the patient-wide contradiction check at start-up. With wait=True the server only starts serving
+    once it is done (bounded by LLM_CONTRA_TIMEOUT_S). Returns True if the result is ready."""
+    if not ENABLED:
+        return False
+    fut = contradictions_future(patient, context)
+    if wait:
+        try:
+            fut.result(timeout=CONTRA_TIMEOUT_S)
+        except Exception as e:  # requests still work: rule-based contradictions + retry on next request
+            log.warning("contradiction warm-up failed: %s", type(e).__name__)
+    return fut.done() and not fut.exception()
+
+
+def contradictions_status(patient_id: str) -> str:
+    fut = _contra_cache.get(patient_id)
+    return "not started" if fut is None else "loading" if not fut.done() else "failed" if fut.exception() else "ready"
 
 
 # ---------------------------------------------------------------- pipeline
@@ -344,12 +430,13 @@ def _plan(role: str, task: str) -> list[dict]:
     return [n | {"id": f"n{i + 1}"} for i, n in enumerate(needs[:12])]
 
 
-def _verify(facts: list[CandidateFact], contras: list[CandidateContradiction], situation: str):
+def _verify(facts: list[CandidateFact], contras: list[CandidateContradiction], situation: str,
+            timeout: float = WORKER_TIMEOUT_S):
     lines = ["FACTS:"] + [f"[f{i}] {f.label}: {f.value}" + (" (calculated)" if f.derived else "") + " | quotes: "
                           + " ; ".join(f'"{s.quote}"' for s in f.sources) for i, f in enumerate(facts)]
     lines += ["", "CONTRADICTIONS:"] + [f"[c{i}] {c.summary} | " + " ; ".join(
         f'{cl.statement}: "{cl.source.quote}"' for cl in c.claims) for i, c in enumerate(contras)]
-    data = _chat("verifier", "verify", VERIFY_SYS, f"SITUATION: {situation}\n\n" + "\n".join(lines), WORKER_TIMEOUT_S)
+    data = _chat("verifier", "verify", VERIFY_SYS, f"SITUATION: {situation}\n\n" + "\n".join(lines), timeout)
     if not data:
         return facts, contras
     bad_f = {v.get("id") for v in data.get("facts") or [] if isinstance(v, dict) and v.get("supported") is False}
@@ -382,25 +469,31 @@ def reconcile(patient: Patient, needs: list[dict], summary: dict | None, missing
             add(_fact(patient, f, cat))
     covered = {f.category for f in facts}
 
-    status = {by_id.get(str(m.get("need_id"))): m for m in (missing or {}).get("needs") or [] if isinstance(m, dict)}
+    status: dict[str, list[dict]] = {}                 # missing-info worker: one or more entries per need
+    for m in (missing or {}).get("needs") or []:
+        if isinstance(m, dict):
+            status.setdefault(by_id.get(str(m.get("need_id")), ""), []).append(m)
     not_documented = []
     for n in needs:
-        m = status.get(n["category"])
-        if m is None and n["category"] in absent and n.get("source") == "checklist":
-            m = {"documented": False, "label": absent[n["category"]]}
-        if n["category"] in covered or m is None:
-            continue                                   # summary found evidence, or no verdict -> say nothing
-        if m.get("documented"):
-            add(_fact(patient, m, n["category"]))      # fills a gap the summary worker missed (verified only)
-            if any(f.category == n["category"] for f in facts):
-                continue
-            if _sources(patient, m.get("sources")):
-                continue                               # evidence exists but no usable value: don't claim absence
+        cat = n["category"]
+        entries = status.get(cat) or ([{"documented": False, "label": absent[cat]}] if cat in absent else [])
+        for m in entries:
+            if m.get("documented"):
+                add(_fact(patient, m, cat))            # fills gaps the summary worker missed (verified only)
+        has_fact = any(f.category == cat for f in facts)
         if n.get("source") != "checklist":
             continue                                   # LLM-added needs only show when found (no clutter)
-        item = str(m.get("label") or "") if not m.get("documented") else ""
-        not_documented.append(CandidateMissing(category=n["category"], item=item if len(item) > 8 else n["need"],
-                                               searched=[str(s) for s in m.get("searched") or []][:8]))
+        if not has_fact and any(m.get("documented") and _sources(patient, m.get("sources")) for m in entries):
+            continue                                   # evidence exists but no usable value: don't claim absence
+        for m in entries:
+            if m.get("documented"):
+                continue
+            item = str(m.get("label") or "").strip()
+            specific = len(item) > 8 and _fold(item) != _fold(n["need"])
+            if has_fact and not specific:
+                continue                               # the need is answered; only list specific missing items
+            not_documented.append(CandidateMissing(category=cat, item=item if specific else n["need"],
+                                                   searched=[str(s) for s in m.get("searched") or []][:8]))
     order = {c: i for i, c in enumerate(n["category"] for n in needs)}
     facts.sort(key=lambda f: order.get(f.category, 99))
     return facts, not_documented
@@ -412,16 +505,17 @@ def summarize(patient: Patient, role: str, task: str, context: str) -> Candidate
     needs = _plan(role, task)
     t1 = time.perf_counter()
     listing = "\n".join(f"- {n['id']} ({n['category']}): {n['need']}" for n in needs)
-    user = f"{context}\n\nROLE: {role}\nTASK: {task}\n\nINFORMATION NEEDS:\n{listing}"
-    f_sum = _pool.submit(_chat, "summary", "summary", SUMMARY_SYS, user, WORKER_TIMEOUT_S)
-    f_mis = _pool.submit(_chat, "missing", "missing", MISSING_SYS, user, WORKER_TIMEOUT_S)
-    summary, missing = f_sum.result(), f_mis.result()
+    user = f"ROLE: {role}\nTASK: {task}\n\nINFORMATION NEEDS:\n{listing}"
+    worker_timeout = max(2.0, BUDGET_S - 0.3 - (t1 - t0))      # whatever the planner left of the budget
+    f_sum = _pool.submit(_chat, "summary", "summary", SUMMARY_SYS, user, worker_timeout, context)
+    f_mis = _pool.submit(_chat, "missing", "missing", MISSING_SYS, user, worker_timeout, context)
+    summary, missing = f_sum.result(), f_mis.result()       # if one fails, reconcile() uses the other
     t2 = time.perf_counter()
     try:
-        remaining = max(0.5, WORKER_TIMEOUT_S - (time.perf_counter() - t0))
+        remaining = max(0.1, BUDGET_S - 0.2 - (time.perf_counter() - t0))
         contras = contra_fut.result(timeout=remaining)
-    except Exception as e:  # timeout or failure: show the screen without contradictions rather than wait
-        log.warning("contradictions unavailable: %s", type(e).__name__)
+    except Exception as e:  # still loading or failed: serve the screen (rule-based contradictions still shown)
+        log.warning("AI contradictions %s: %s", contradictions_status(patient.patient_id), type(e).__name__)
         contras = []
     t3 = time.perf_counter()
     facts, not_documented = reconcile(patient, needs, summary, missing)
