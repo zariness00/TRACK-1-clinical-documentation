@@ -76,8 +76,8 @@ def laterality_ok(value: str, quotes: list[str]) -> bool:
 # ---------- negation / certainty ----------
 _NEG_DE = re.compile(r"\b(kein|keine|keinen|keiner|keinem|keines|nicht|ohne|negativ|ausgeschlossen|kein Anhalt)\b", re.I)
 _NEG_EN = re.compile(r"\b(no|not|none|without|negative|absent|excluded|ruled out|denies|nicht|kein\w*|ohne|negativ)\b", re.I)
-_SUSPECT_DE = re.compile(r"(\bV\.?\s?a\.|\bVd\.?\s?a\.|Verdacht|suspekt|fraglich|\bDD\b|malignomsuspekt)", re.I)
-_SUSPECT_EN = re.compile(r"\b(suspect\w*|suspicion|possible|possibly|probable|query|queried|likely|unconfirmed|vd\.?a\.?)\b|\?", re.I)
+_SUSPECT_DE = re.compile(r"(\bV\.?\s?a\.|\bVd\.?\s?a\.|Verdacht|suspekt|fraglich|\bDD\b|malignomsuspekt|Fragestellung|\?)", re.I)
+_SUSPECT_EN = re.compile(r"\b(suspect\w*|suspicion|possible|possibly|probable|query|queried|question\w*|rule out|r/o|likely|unconfirmed|vd\.?a\.?)\b|\?", re.I)
 _CLAUSE_SPLIT = re.compile(r"[,;:()]|\s-\s|\bsowie\b|\bund\b")
 
 
@@ -101,7 +101,8 @@ def negation_ok(value: str, quotes: list[str]) -> bool:
 
 
 def certainty_ok(value: str, quotes: list[str]) -> bool:
-    """A suspected finding ("Vd.a. Mamma-Ca") must not be shown as confirmed,
+    """A suspected finding ("Vd.a. Mamma-Ca") or a clinical question ("Fragestellung: Carotisstenose?")
+    must not be shown as a confirmed finding,
     unless another cited quote states it without the suspicion marker."""
     suspected = [bool(_SUSPECT_DE.search(q)) for q in quotes]
     if suspected and all(suspected) and not _SUSPECT_EN.search(value):
@@ -234,7 +235,8 @@ def validate(patient: Patient, cand: CandidateOutput) -> tuple[list[Fact], list[
         if len(claims) < 2:
             rejected.append(Rejected(kind="contradiction", item=cc.summary, reason="fewer than 2 verified passages"))
             continue
-        contras.append(Contradiction(id=f"c{i}", category=cc.category, summary=cc.summary, claims=claims))
+        contras.append(Contradiction(id=f"c{i}", category=cc.category, summary=cc.summary, claims=claims,
+                                     confidence=cc.confidence, origin=cc.origin))
 
     missing = [Missing(**m.model_dump()) for m in cand.not_documented]
     # a "not documented" item contradicted by a verified fact in the same category is dropped

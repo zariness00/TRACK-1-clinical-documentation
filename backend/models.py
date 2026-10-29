@@ -7,6 +7,7 @@ or rejects them. Gregor renders only `SummaryResponse`.
 from __future__ import annotations
 
 from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -43,6 +44,8 @@ class CandidateContradiction(BaseModel):
     category: str = "general"
     summary: str                       # "Two different dates for the mastectomy"
     claims: list[CandidateClaim]
+    confidence: str = "high"           # high | medium
+    origin: str = "ai"                 # ai | rules
 
 
 class CandidateMissing(BaseModel):
@@ -92,6 +95,8 @@ class Contradiction(BaseModel):
     category: str
     summary: str
     claims: list[Claim]
+    confidence: str = "high"
+    origin: str = "ai"
 
 
 class Missing(BaseModel):
