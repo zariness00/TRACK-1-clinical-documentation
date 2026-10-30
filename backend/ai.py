@@ -109,6 +109,30 @@ DEFAULT_NEEDS = [("diagnoses", "Active diagnoses"), ("current_medication", "Curr
                  ("allergies", "Documented allergies")]
 LIST_NEEDS = {"current_medication", "diagnoses", "comorbidities"}     # broad lists: one concise fact, asked last
 
+# Display groups: the screen groups facts under these few headings (fact.category in the response), for every
+# role, known or unseen. Internal need categories (e.g. "hba1c") are only used for planning and reconciliation.
+GROUPS = ["Allergies", "Medication", "Diagnoses & history", "Lab values", "Body measurements",
+          "Plans & follow-up", "Other"]
+NEED_GROUP = {
+    "allergies": "Allergies", "contrast_allergy": "Allergies",
+    "antithrombotics": "Medication", "current_medication": "Medication", "glucose_lowering_drugs": "Medication",
+    "antihypertensives": "Medication", "metformin": "Medication",
+    "demographics": "Diagnoses & history", "diagnoses": "Diagnoses & history", "comorbidities": "Diagnoses & history",
+    "previous_episodes": "Diagnoses & history", "cv_risk": "Diagnoses & history",
+    "cardiac_function": "Diagnoses & history", "vascular_findings": "Diagnoses & history",
+    "histology_tnm": "Diagnoses & history", "receptor_status": "Diagnoses & history",
+    "tumour_location_size": "Diagnoses & history", "lymph_nodes": "Diagnoses & history",
+    "hba1c": "Lab values", "kidney_function": "Lab values",
+    "body_measurements": "Body measurements", "weight_trend": "Body measurements",
+    "tumour_board": "Plans & follow-up", "recommended_follow_ups": "Plans & follow-up",
+    "follow_up_done": "Plans & follow-up",
+}
+
+
+def group_of(need: dict) -> str:
+    g = need.get("group") or NEED_GROUP.get(need["category"])
+    return g if g in GROUPS else "Other"
+
 
 def checklist_needs(role: str, task: str) -> tuple[list[dict], bool]:
     """(needs, known): known = the role/task matched at least one checklist."""
@@ -139,7 +163,8 @@ def _arr(item: dict) -> dict:
 
 _SOURCE = _obj({"doc_id": S, "passage_id": S, "quote": S})
 SCHEMAS = {
-    "plan": _obj({"add": _arr(_obj({"category": S, "need": S})), "drop": _arr(S)}),
+    "plan": _obj({"add": _arr(_obj({"category": S, "need": S, "group": {"type": "string", "enum": GROUPS}})),
+                  "drop": _arr(S)}),
     "summary": _obj({"facts": _arr(_obj({"need_id": S, "label": S, "value": S, "date": S, "derived": B,
                                          "sources": _arr(_SOURCE)}))}),
     "missing": _obj({"needs": _arr(_obj({"need_id": S, "documented": B, "searched": _arr(S), "label": S,
@@ -157,7 +182,8 @@ You get the situation and a checklist of information needs. Add at most 3 needs 
 clinically important for THIS situation AND typically written in hospital letters (diagnoses, findings, medication,
 allergies, procedures, plans). Do not add bedside items that letters do not contain (airway exam, fasting status,
 contact details, current symptoms). Add nothing if the checklist is complete. Categories are short snake_case.
-Return JSON only: {{"add": [{{"category", "need"}}], "drop": []}}"""
+group = the screen section the need belongs to, one of: {", ".join(GROUPS)}.
+Return JSON only: {{"add": [{{"category", "need", "group"}}], "drop": []}}"""
 UNKNOWN_HINT = ("\nThis role/task has no specific checklist: the checklist above is generic, so add up to 6 needs "
                 "that this clinician needs for this task (most important first).")
 
@@ -501,7 +527,8 @@ def _plan(role: str, task: str) -> list[dict]:
             cat = re.sub(r"[^a-z0-9_]+", "_", str(a.get("category") or "").lower()).strip("_")
             if cat and cat not in cats and a.get("need"):
                 cats.add(cat)
-                needs.append({"category": cat, "need": str(a["need"]), "source": "planner"})
+                needs.append({"category": cat, "need": str(a["need"]), "source": "planner",
+                              "group": str(a.get("group") or "")})
     # priority order: task-specific needs first (checklist / planner order), broad list needs last
     needs.sort(key=lambda n: n["category"] in LIST_NEEDS)
     return [n | {"id": f"n{i + 1}"} for i, n in enumerate(needs[:12])]
@@ -613,5 +640,8 @@ def summarize(patient: Patient, role: str, task: str, context: str) -> Candidate
     last_timings.update(planner=round(t1 - t0, 2), workers=round(t2 - t1, 2), contradictions_wait=round(t3 - t2, 2),
                         reconcile_verify=round(t4 - t3, 2), total=round(t4 - t0, 2))
     log.info("pipeline %s", last_timings)
-    return CandidateOutput(categories=[n["category"] for n in needs], facts=facts,
+    group = {n["category"]: group_of(n) for n in needs}      # internal need -> screen heading
+    for x in [*facts, *not_documented]:
+        x.category = group.get(x.category, "Other")
+    return CandidateOutput(categories=list(dict.fromkeys(group[n["category"]] for n in needs)), facts=facts,
                            not_documented=not_documented, contradictions=contras, not_checked=not_checked)
