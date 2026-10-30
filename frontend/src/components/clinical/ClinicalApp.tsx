@@ -28,9 +28,10 @@ function SourceChip({ source, onOpen }: { source: Source; onOpen: Open }) {
 }
 
 // Gaps in the analysis itself: never to be read as "not documented" or as a complete screen.
+// Items rejected by verification are not shown to clinicians (only logged in the browser console by verify.ts).
 function AnalysisNotices({ s }: { s: SummaryResponse }) {
   const notChecked = s.not_checked ?? [];
-  if (!notChecked.length && !s.rejected.length) return null;
+  if (!notChecked.length) return null;
   return (
     <div role="alert" className="mb-4 space-y-2 rounded-sm border border-cave bg-cave-bg px-3 py-2 text-cave">
       {notChecked.length > 0 && (
@@ -39,9 +40,6 @@ function AnalysisNotices({ s }: { s: SummaryResponse }) {
           <div className="text-sm">The AI ran out of time or failed. This does not mean they are absent from the record. Check the documents or try again.</div>
           <ul className="mt-1 list-disc pl-5 text-sm">{notChecked.map((n, i) => <li key={i}>{n}</li>)}</ul>
         </div>
-      )}
-      {s.rejected.length > 0 && (
-        <div className="text-sm font-medium">{s.rejected.length} {s.rejected.length === 1 ? "item was" : "items were"} removed because {s.rejected.length === 1 ? "it" : "they"} could not be verified against the documents.</div>
       )}
     </div>
   );
