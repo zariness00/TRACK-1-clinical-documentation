@@ -16,10 +16,10 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
 
 import httpx
 
+from .config import load_dotenv
 from .corpus import Patient
 from .models import (CandidateClaim, CandidateContradiction, CandidateFact, CandidateMissing,
                      CandidateOutput, CandidateSource)
@@ -29,15 +29,7 @@ from .verify import verify_quote
 log = logging.getLogger("backend.ai")
 
 
-def _load_dotenv(path: Path = Path(__file__).resolve().parent.parent / ".env") -> None:
-    if path.exists():
-        for line in path.read_text().splitlines():
-            k, sep, v = line.strip().partition("=")
-            if sep and not k.startswith("#") and v.strip():
-                os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
-
-
-_load_dotenv()
+load_dotenv()      # already done by config on import; harmless, keeps this module self-contained
 KEY = os.environ.get("NEBIUS_API_KEY") or os.environ.get("LLM_API_KEY")
 ENABLED = bool(KEY)
 BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.tokenfactory.us-central1.nebius.com/v1").rstrip("/")
