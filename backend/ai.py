@@ -115,6 +115,7 @@ CHECKLISTS: list[tuple[list[str], list[tuple[str, str]]]] = [
 ]
 DEFAULT_NEEDS = [("diagnoses", "Active diagnoses"), ("current_medication", "Current medication with doses"),
                  ("allergies", "Documented allergies")]
+LIST_NEEDS = {"current_medication", "diagnoses", "comorbidities"}     # broad lists: one concise fact, asked last
 
 
 def checklist_needs(role: str, task: str) -> tuple[list[dict], bool]:
@@ -170,9 +171,13 @@ UNKNOWN_HINT = ("\nThis role/task has no specific checklist: the checklist above
 
 SUMMARY_SYS = f"""You extract facts for a clinician from the German clinical documents of one patient.
 Today is {TODAY} (date of the latest document). Search ALL documents for each information need.
+- The needs are listed by priority for this clinician's task (most important first). Output facts in that
+  order: finish the first needs before moving on, so the most important facts come first.
 - Use only the documents. Never add knowledge that is not in them. Skip needs you cannot answer.
 - One fact per distinct item: one per drug, one per measurement or finding. need_id = the id of the need it
   answers (e.g. "n3"). A drug that answers a specific need (e.g. the antithrombotic) gets its own fact for that need.
+- Needs marked [LIST] (e.g. all current medication, all diagnoses): ONE concise fact listing every item, with
+  one source per item. Never drop an item to shorten the list.
 - label: short English; value: concise English (translate German terms; brand name plus generic name for drugs),
   keep numbers, doses, schedules (1-0-1) and left/right exactly.
 - Only facts that are present. Never output a fact saying something is "not documented" / "not specified".
@@ -183,7 +188,7 @@ Today is {TODAY} (date of the latest document). Search ALL documents for each in
   says it (links/rechts/li./re.). Split compound answers into separate facts that are each fully supported by
   their own quote (e.g. "previous episode: ..." and "cause found: ..." as two facts).
 - For current status ("does she take"), use the latest document that mentions it and give its date.
-- Be brief: at most 3 facts per need, one source per fact unless the value combines passages, and quote only the
+- Be brief: at most 3 facts per need ([LIST]: one), one source per fact unless the value combines passages, quote only the
   relevant words (about 10-120 characters), not whole paragraphs.
 - {CITE}
 Return JSON only: {{"facts": [{{"need_id", "label", "value", "date", "derived", "sources": [{{"doc_id", "passage_id", "quote"}}]}}]}}"""
@@ -196,7 +201,8 @@ and if documented: label, value (short English answer, no dates, every number mu
 with the evidence; if not documented: label = exactly what is missing, specific (e.g. "No record that the carotid
 duplex follow-up took place"), value = "", sources = []. Only mark documented when you can quote the evidence; the
 value must be fully supported by that one quote. If a need covers several items (e.g. each recommended follow-up),
-return one entry per item with the same need_id. Keep it short.
+return one entry per item with the same need_id. Go through the needs in the listed order (most important
+first). For [LIST] needs, one entry is enough. Keep it short.
 - {CITE}
 Return JSON only: {{"needs": [{{"need_id", "documented", "searched", "label", "value", "sources": [{{"doc_id", "passage_id", "quote"}}]}}]}}"""
 
@@ -352,7 +358,11 @@ def _fact(patient: Patient, f: dict, category: str) -> CandidateFact | None:
         return None                                     # absence is reported via not_documented, never as a fact
     quotes = [" … ".join(s.text for s in verify_quote(patient, s.doc_id, s.quote).spans) for s in srcs]
     if not _guards_ok(value, bool(f.get("derived")), quotes):
-        return None
+        # models annotate series with ISO dates ("78 kg (2015-06-28)") that are not in the quotes; the source
+        # document date is shown anyway, so drop those annotations and re-check (all other guards unchanged)
+        value = re.sub(r"\s*\(\s*\d{4}-\d{2}(-\d{2})?\s*\)|\s*\b(on|from|at)?\s*\d{4}-\d{2}-\d{2}\b", "", value).strip(" ,;")
+        if not value or not _guards_ok(value, bool(f.get("derived")), quotes):
+            return None
     return CandidateFact(category=category, label=str(f.get("label") or category), value=value,
                          date=str(f.get("date") or "") or None, derived=bool(f.get("derived")), sources=srcs)
 
@@ -436,6 +446,8 @@ def _plan(role: str, task: str) -> list[dict]:
             if cat and cat not in cats and a.get("need"):
                 cats.add(cat)
                 needs.append({"category": cat, "need": str(a["need"]), "source": "planner"})
+    # priority order: task-specific needs first (checklist / planner order), broad list needs last
+    needs.sort(key=lambda n: n["category"] in LIST_NEEDS)
     return [n | {"id": f"n{i + 1}"} for i, n in enumerate(needs[:12])]
 
 
@@ -513,7 +525,8 @@ def summarize(patient: Patient, role: str, task: str, context: str) -> Candidate
     contra_fut = contradictions_future(patient, context)          # starts now (or is cached)
     needs = _plan(role, task)
     t1 = time.perf_counter()
-    listing = "\n".join(f"- {n['id']} ({n['category']}): {n['need']}" for n in needs)
+    listing = "\n".join(f"- {n['id']} ({n['category']}){' [LIST]' if n['category'] in LIST_NEEDS else ''}: "
+                        f"{n['need']}" for n in needs)
     user = f"ROLE: {role}\nTASK: {task}\n\nINFORMATION NEEDS:\n{listing}"
     worker_timeout = max(2.0, BUDGET_S - 0.3 - (t1 - t0))      # whatever the planner left of the budget
     f_sum = _pool.submit(_chat, "summary", "summary", SUMMARY_SYS, user, worker_timeout, context)
