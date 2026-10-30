@@ -1,0 +1,121 @@
+# Physician specialties in Austria
+# Based on the ELGA lists elga-fachaerzte (v1.3.0) and elga-gtelvogdarollen (v1.3.0),
+# plus Allgemeinmedizin und Familienmedizin (Aerztegesetz, in force 2026-06-01).
+# Compared with the OeAeK Fachbezeichnungen code list published by EVGA (2025-01-24).
+# Not reviewed by a clinician or checked against the current AeAO 2015 text.
+
+## Current titles
+Allgemeinchirurgie und Gefäßchirurgie
+Allgemeinchirurgie und Viszeralchirurgie
+Allgemeinmedizin
+Allgemeinmedizin und Familienmedizin
+Anästhesiologie und Intensivmedizin
+Anatomie
+Arbeitsmedizin und angewandte Physiologie
+Augenheilkunde und Optometrie
+Frauenheilkunde und Geburtshilfe
+Gerichtsmedizin
+Hals-, Nasen- und Ohrenheilkunde
+Haut- und Geschlechtskrankheiten
+Herzchirurgie
+Histologie, Embryologie und Zellbiologie
+Innere Medizin
+Innere Medizin und Angiologie
+Innere Medizin und Endokrinologie und Diabetologie
+Innere Medizin und Gastroenterologie und Hepatologie
+Innere Medizin und Hämatologie und internistische Onkologie
+Innere Medizin und Infektiologie
+Innere Medizin und Intensivmedizin
+Innere Medizin und Kardiologie
+Innere Medizin und Nephrologie
+Innere Medizin und Pneumologie
+Innere Medizin und Rheumatologie
+Kinder- und Jugendchirurgie
+Kinder- und Jugendheilkunde
+Kinder- und Jugendpsychiatrie und Psychotherapeutische Medizin
+Klinische Immunologie
+Klinische Immunologie und Spezifische Prophylaxe und Tropenmedizin
+Klinische Mikrobiologie und Hygiene
+Klinische Mikrobiologie und Virologie
+Klinische Pathologie und Molekularpathologie
+Klinische Pathologie und Neuropathologie
+Medizinische Genetik
+Medizinische und Chemische Labordiagnostik
+Mund-, Kiefer- und Gesichtschirurgie
+Neurochirurgie
+Neurologie
+Nuklearmedizin
+Orthopädie und orthopädische Chirurgie
+Orthopädie und Traumatologie
+Pharmakologie und Toxikologie
+Physikalische Medizin und Allgemeine Rehabilitation
+Physiologie und Pathophysiologie
+Plastische, Rekonstruktive und Ästhetische Chirurgie
+Psychiatrie und Psychotherapeutische Medizin
+Public Health
+Radiologie
+Strahlentherapie-Radioonkologie
+Thoraxchirurgie
+Transfusionsmedizin
+Urologie
+Zahn-, Mund- und Kieferheilkunde
+
+## Former titles (for older records)
+Arbeitsmedizin
+Chirurgie
+Kinder- und Jugendpsychiatrie
+Lungenkrankheiten
+Medizinische Biologie
+Medizinische Biophysik
+Medizinische Leistungsphysiologie
+Mikrobiologisch-Serologische Labordiagnostik
+Neurobiologie
+Neurologie und Psychiatrie
+Neuropathologie
+Pathologie
+Pathophysiologie
+Physiologie
+Psychiatrie
+Psychiatrie und Neurologie
+Sozialmedizin
+Spezifische Prophylaxe und Tropenmedizin
+Theoretische Sonderfächer
+Tumorbiologie
+Unfallchirurgie
+Virologie
+
+## Additional qualifications (Additivfächer)
+Angiologie
+Endokrinologie und Stoffwechselerkrankungen
+Gastroenterologie und Hepatologie
+Gefäßchirurgie
+Geriatrie
+Hämatologie und internistische Onkologie
+Hochvolt- und Brachytherapie
+Humangenetik
+Infektiologie
+Infektiologie und Tropenmedizin
+Intensivmedizin
+Internistische Sportheilkunde
+Kardiologie
+Kinder- und Jugendneuropsychiatrie
+Kinderchirurgie
+Klinische Pharmakologie
+Neonatologie und pädiatrische Intensivmedizin
+Nephrologie
+Neuropädiatrie
+Pädiatrische Endokrinologie und Diabetologie
+Pädiatrische Hämatologie und Onkologie
+Pädiatrische Intensivmedizin
+Pädiatrische Intensivmedizin und Neonatologie
+Pädiatrische Kardiologie
+Pädiatrische Pulmonologie
+Phoniatrie
+Physikalische Sportheilkunde
+Plastische Chirurgie
+Rheumatologie
+Sportorthopädie
+Sporttraumatologie
+Tropenmedizin
+Viszeralchirurgie
+Zytodiagnostik
