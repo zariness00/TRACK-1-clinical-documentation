@@ -77,7 +77,7 @@ def laterality_ok(value: str, quotes: list[str]) -> bool:
 _NEG_DE = re.compile(r"\b(kein|keine|keinen|keiner|keinem|keines|nicht|ohne|negativ|ausgeschlossen|kein Anhalt)\b", re.I)
 _NEG_EN = re.compile(r"\b(no|not|none|without|negative|absent|excluded|ruled out|denies|nicht|kein\w*|ohne|negativ)\b", re.I)
 _SUSPECT_DE = re.compile(r"(\bV\.?\s?a\.|\bVd\.?\s?a\.|Verdacht|suspekt|fraglich|\bDD\b|malignomsuspekt|Fragestellung|\?)", re.I)
-_SUSPECT_EN = re.compile(r"\b(suspect\w*|suspicion|possible|possibly|probable|query|queried|question\w*|rule out|r/o|likely|unconfirmed|vd\.?a\.?)\b|\?", re.I)
+_SUSPECT_EN = re.compile(r"\b(suspect\w*|suspicio\w*|possible|possibly|probable|query|queried|question\w*|rule out|r/o|likely|unconfirmed|vd\.?a\.?)\b|\?", re.I)
 _CLAUSE_SPLIT = re.compile(r"[,;:()]|\s-\s|\bsowie\b|\bund\b")
 
 
