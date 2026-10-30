@@ -55,7 +55,7 @@ VERIFY = os.environ.get("LLM_VERIFY", "0") == "1"
 # (background, cached per patient) keeps bounded reasoning.
 REASONING = {r: os.environ.get(f"LLM_REASONING_{r.upper()}", d) for r, d in
              {"planner": "off", "summary": "off", "missing": "off", "contras": "medium", "verifier": "off"}.items()}
-PLANNER_TIMEOUT_S = float(os.environ.get("LLM_PLANNER_TIMEOUT_S", "2.5"))
+PLANNER_TIMEOUT_S = float(os.environ.get("LLM_PLANNER_TIMEOUT_S", "2"))   # only for unfamiliar roles/tasks
 BUDGET_S = float(os.environ.get("LLM_BUDGET_S", "9"))          # hard end-to-end budget for one request
 WORKER_TIMEOUT_S = BUDGET_S - 0.5
 CONTRA_TIMEOUT_S = float(os.environ.get("LLM_CONTRA_TIMEOUT_S", "90"))
@@ -117,7 +117,8 @@ DEFAULT_NEEDS = [("diagnoses", "Active diagnoses"), ("current_medication", "Curr
                  ("allergies", "Documented allergies")]
 
 
-def checklist_needs(role: str, task: str) -> list[dict]:
+def checklist_needs(role: str, task: str) -> tuple[list[dict], bool]:
+    """(needs, known): known = the role/task matched at least one checklist."""
     q = f" {role} {task} ".lower()
     seen, needs = set(), []
     for keys, items in CHECKLISTS:
@@ -126,7 +127,9 @@ def checklist_needs(role: str, task: str) -> list[dict]:
                 if cat not in seen:
                     seen.add(cat)
                     needs.append({"category": cat, "need": need, "source": "checklist"})
-    return needs or [{"category": c, "need": n, "source": "checklist"} for c, n in DEFAULT_NEEDS]
+    if needs:
+        return needs, True
+    return [{"category": c, "need": n, "source": "checklist"} for c, n in DEFAULT_NEEDS], False
 
 
 # ---------------------------------------------------------------- prompts + schemas
@@ -162,6 +165,8 @@ clinically important for THIS situation AND typically written in hospital letter
 allergies, procedures, plans). Do not add bedside items that letters do not contain (airway exam, fasting status,
 contact details, current symptoms). Add nothing if the checklist is complete. Categories are short snake_case.
 Return JSON only: {{"add": [{{"category", "need"}}], "drop": []}}"""
+UNKNOWN_HINT = ("\nThis role/task has no specific checklist: the checklist above is generic, so add up to 6 needs "
+                "that this clinician needs for this task (most important first).")
 
 SUMMARY_SYS = f"""You extract facts for a clinician from the German clinical documents of one patient.
 Today is {TODAY} (date of the latest document). Search ALL documents for each information need.
@@ -417,16 +422,20 @@ def contradictions_status(patient_id: str) -> str:
 
 # ---------------------------------------------------------------- pipeline
 def _plan(role: str, task: str) -> list[dict]:
-    needs = checklist_needs(role, task)
-    listing = "\n".join(f"- [{n['category']}] {n['need']}" for n in needs)
-    data = _chat("planner", "plan", PLAN_SYS, f"ROLE: {role}\nTASK: {task}\n\nCHECKLIST:\n{listing}", PLANNER_TIMEOUT_S)
-    if data:      # checklist needs are never dropped (safety); the LLM only adds task-specific ones
+    """Known role/task -> its checklist, no LLM call (the workers still get the full task text).
+    Unfamiliar role/task -> LLM plans task-specific needs on top of a generic checklist (short timeout,
+    falls back to the generic checklist)."""
+    needs, known = checklist_needs(role, task)
+    if not known:
+        listing = "\n".join(f"- [{n['category']}] {n['need']}" for n in needs)
+        data = _chat("planner", "plan", PLAN_SYS + UNKNOWN_HINT,
+                     f"ROLE: {role}\nTASK: {task}\n\nCHECKLIST:\n{listing}", PLANNER_TIMEOUT_S)
         cats = {n["category"] for n in needs}
-        for a in (data.get("add") or [])[:3]:
+        for a in ((data or {}).get("add") or [])[:6]:
             cat = re.sub(r"[^a-z0-9_]+", "_", str(a.get("category") or "").lower()).strip("_")
             if cat and cat not in cats and a.get("need"):
                 cats.add(cat)
-                needs.append({"category": cat, "need": str(a["need"]), "source": "llm"})
+                needs.append({"category": cat, "need": str(a["need"]), "source": "planner"})
     return [n | {"id": f"n{i + 1}"} for i, n in enumerate(needs[:12])]
 
 
@@ -481,8 +490,8 @@ def reconcile(patient: Patient, needs: list[dict], summary: dict | None, missing
             if m.get("documented"):
                 add(_fact(patient, m, cat))            # fills gaps the summary worker missed (verified only)
         has_fact = any(f.category == cat for f in facts)
-        if n.get("source") != "checklist":
-            continue                                   # LLM-added needs only show when found (no clutter)
+        if n.get("source") not in ("checklist", "planner"):
+            continue                                   # optional extra needs only show when found (no clutter)
         if not has_fact and any(m.get("documented") and _sources(patient, m.get("sources")) for m in entries):
             continue                                   # evidence exists but no usable value: don't claim absence
         for m in entries:
