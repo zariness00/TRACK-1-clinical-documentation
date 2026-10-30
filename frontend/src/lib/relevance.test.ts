@@ -21,6 +21,22 @@ describe("task-first evidence selection", () => {
       expect(result.otherFacts.map((f) => f.id)).toEqual(["other"]);
     });
   }
+  it("keeps real AI sections and items in backend order, with nothing moved to Other", () => {
+    const summary = {
+      ...mockSummary("Anaesthetist", "Pre-operative anaesthesia check"),
+      mock: false,
+      categories: ["Lab values", "Allergies", "Medication"],
+      facts: [fact("lab", "Lab values", "Creatinine"), fact("other", "Other", "Unrelated finding"), fact("drug", "Medication", "Thrombo ASS")],
+      not_documented: [{ category: "Allergies", item: "Latex", searched: [] }],
+    };
+    const result = rankSummary(summary);
+    expect(result.categories).toEqual(["Lab values", "Allergies", "Medication", "Other"]);
+    expect(result.priorityFacts.map((f) => f.id)).toEqual(["lab", "other", "drug"]);
+    expect(result.priorityMissing.map((m) => m.item)).toEqual(["Latex"]);
+    expect(result.otherFacts).toEqual([]);
+    expect(result.otherMissing).toEqual([]);
+    expect([...result.relevantContradictions, ...result.otherContradictions].map((c) => c.id).sort()).toEqual(summary.contradictions.map((c) => c.id).sort());
+  });
   it("preserves every returned fact, missing item and contradiction exactly once", () => {
     const summary = mockSummary("Anaesthetist", "Pre-operative anaesthesia check");
     const result = rankSummary(summary);

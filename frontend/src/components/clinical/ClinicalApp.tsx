@@ -88,14 +88,14 @@ function labelRepeatsTopic(label: string, category: string) {
 /** Display-only: drop the label and a leading "Allergie gegen"/"Allergy to" from the shown value. */
 function displayValue(f: Fact) {
   let v = stripLabel(f.value, f.label);
-  if (f.category === "allergies") v = v.replace(/^(allergie\s+gegen|allergy\s+to)\s+/i, "");
+  if (f.category.toLowerCase() === "allergies") v = v.replace(/^(allergie\s+gegen|allergy\s+to)\s+/i, "");
   return v;
 }
 
 function FactRow({ f, n, lit, onHover, onClickRow, onOpen }: { f: Fact; n: number; lit: boolean; onHover: (n: number | null) => void; onClickRow: (f: Fact) => void; onOpen: Open }) {
   const c = rowColor(n);
   // Medication always uses the same layout: drug name as heading, dose line(s) below, newest first.
-  const hist = hasHistory(f) || f.category === "current_medication" ? factHistory(f) : null;
+  const hist = hasHistory(f) || ["current_medication", "medication"].includes(f.category.toLowerCase()) ? factHistory(f) : null;
   const showLabel = !labelRepeatsTopic(f.label, f.category);
   const value = displayValue(f);
   const singleDate = !hist && f.date && f.sources.every((s) => s.doc_date === f.date);

@@ -48,6 +48,19 @@ export function rankSummary(summary: SummaryResponse) {
   const facts = [...summary.facts].sort((a, b) => factScore(b) - factScore(a));
   const missing = [...summary.not_documented].sort((a, b) => missingScore(b) - missingScore(a));
   const contradictions = [...summary.contradictions].sort((a, b) => score(b.category, b.summary) - score(a.category, a.summary));
+  // Real AI: the backend already sends task priority (section order and item order), so nothing is re-ranked or moved
+  // to "Other". Contradiction categories are not display headings, so they keep their own relevance split above.
+  if (!summary.mock) {
+    return {
+      priorityFacts: summary.facts,
+      otherFacts: [] as Fact[],
+      priorityMissing: summary.not_documented,
+      otherMissing: [] as Missing[],
+      relevantContradictions: contradictions.filter((c) => score(c.category, c.summary) > 0),
+      otherContradictions: contradictions.filter((c) => score(c.category, c.summary) === 0),
+      categories: [...new Set([...summary.categories, ...summary.facts.map((f) => f.category), ...summary.not_documented.map((m) => m.category)])],
+    };
+  }
   const categories = [...new Set([...summary.categories, ...facts.map((f) => f.category), ...missing.map((m) => m.category)])]
     .sort((a, b) => {
       const categoryScore = (c: string) => Math.max(score(c, ""), ...facts.filter((f) => f.category === c).map(factScore), ...missing.filter((m) => m.category === c).map(missingScore));
