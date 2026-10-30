@@ -59,6 +59,7 @@ class CandidateOutput(BaseModel):
     facts: list[CandidateFact] = []
     not_documented: list[CandidateMissing] = []
     contradictions: list[CandidateContradiction] = []
+    not_checked: list[str] = []        # needs the AI could not finish analysing (time limit / error)
 
 
 # ---------- what the UI renders (verified only) ----------
@@ -120,6 +121,7 @@ class SummaryResponse(BaseModel):
     facts: list[Fact]
     not_documented: list[Missing]
     contradictions: list[Contradiction]
+    not_checked: list[str] = []        # "analysis incomplete" (show as such, NOT as "not documented")
     rejected: list[Rejected] = []      # for debugging/metrics, not shown to clinicians
     timings_ms: dict[str, float] = {}
     mock: bool = False

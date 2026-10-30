@@ -210,7 +210,7 @@ def summary(req: SummaryRequest):
     stages = getattr(importlib.import_module("backend.ai"), "last_timings", {}) if fn else {}
     return SummaryResponse(
         patient_id=p.patient_id, patient_name=p.name, role=role, task=task,
-        categories=cand.categories, facts=facts, not_documented=missing,
+        categories=cand.categories, facts=facts, not_documented=missing, not_checked=cand.not_checked,
         contradictions=contras, rejected=rejected, mock=fn is None,
         timings_ms={"model": round((t1 - t0) * 1000, 1), "validate": round((t2 - t1) * 1000, 1),
                     "total": round((t2 - t0) * 1000, 1),

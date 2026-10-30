@@ -23,7 +23,7 @@ import httpx
 from .corpus import Patient
 from .models import (CandidateClaim, CandidateContradiction, CandidateFact, CandidateMissing,
                      CandidateOutput, CandidateSource)
-from .validate import certainty_ok, laterality_ok, negation_ok, numbers_ok, polarity_ok
+from .validate import _ints, certainty_ok, laterality_ok, negation_ok, numbers_ok, polarity_ok
 from .verify import verify_quote
 
 log = logging.getLogger("backend.ai")
@@ -296,7 +296,8 @@ def _chat(role: str, schema: str, system: str, user: str, timeout: float, docs: 
     deadline = t0 + timeout
     try:
         with _http.stream("POST", f"{BASE_URL}/chat/completions", json=body | {"stream": True},
-                          timeout=httpx.Timeout(timeout), headers={"Authorization": f"Bearer {KEY}"}) as r:
+                          timeout=httpx.Timeout(timeout, connect=min(3.0, timeout)),  # fail fast on bad network
+                          headers={"Authorization": f"Bearer {KEY}"}) as r:
             r.raise_for_status()
             for line in r.iter_lines():
                 if line.startswith("data:"):
@@ -315,7 +316,11 @@ def _chat(role: str, schema: str, system: str, user: str, timeout: float, docs: 
     data = _parse("".join(parts))
     log.log(logging.INFO if complete else logging.WARNING, "%s (%s) %.2fs%s", role, model,
             time.perf_counter() - t0, "" if complete else " (deadline: partial output kept)")
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if not complete:
+        data["_partial"] = True
+    return data
 
 
 # ---------------------------------------------------------------- evidence helpers
@@ -351,18 +356,74 @@ def _guards_ok(value: str, derived: bool, quotes: list[str]) -> bool:
             and negation_ok(value, quotes) and certainty_ok(value, quotes))
 
 
+_DATE_BITS = re.compile(r"\s*\(\s*\d{4}-\d{2}(-\d{2})?\s*\)|\s*\b(on|from|at)?\s*\d{4}-\d{2}-\d{2}\b")
+_EXTRAS = re.compile(r"\s*\([^()]*\)|\s*\b(?:in|on|from|since|at)?\s*\d{1,2}[./]\d{1,2}[./]\d{2,4}\b"
+                     r"|\s*\b(?:in|on|from|since|at)?\s*\d{1,2}/\d{4}\b")
+
+
+# words that change the clinical meaning of a value: such values are never trimmed (all-or-nothing)
+_QUALIFIER = re.compile(r"\b(paus\w*|stop\w*|discontinu\w*|until|till|bis|ended|ceased|held|withheld|abgesetzt|"
+                        r"pausiert|increas\w*|decreas\w*|reduc\w*|chang\w*|switch\w*|replac\w*|erhöht|reduziert|"
+                        r"umgestellt|not|no|kein\w*|without|ohne|instead)\b", re.I)
+_UNIT = r"(mg|µg|ug|mcg|g|ml|ie|iu|%|kg|cm|mm|mmhg|mmol|/min)"
+_NUM_UNIT = re.compile(r"(\d+(?:[.,]\d+)?)\s*" + _UNIT + r"(?![a-z])", re.I)
+_ANY_DATE = re.compile(r"\d{1,2}[./]\d{1,2}[./]\d{2,4}|\b\d{1,2}/\d{4}\b|\d{4}-\d{2}(-\d{2})?")
+_SIDE = re.compile(r"\b(left|right|links|rechts|li|re|sin|dex|bilateral|beidseits|bds)\b\.?", re.I)
+_ANNOTATION_WORDS = re.compile(r"\b(in|on|from|since|at|am|vom|dated|left|right|links|rechts|li|re|sin|dex|"
+                               r"bilateral|mg|µg|ug|mcg|g|ml|ie|iu|kg|cm|mm|mmhg|mmol|min)\b", re.I)
+
+
+def _conflicts(text: str, quotes: list[str]) -> bool:
+    """True if `text` states a dose/measurement, side or date that the quotes state DIFFERENTLY
+    (as opposed to the quotes simply not mentioning it)."""
+    q = " ".join(quotes)
+    have = set().union(*(_ints(x) for x in quotes))
+    for num, unit in _NUM_UNIT.findall(text):
+        if (num.split(",")[0].split(".")[0].lstrip("0") or "0") not in have and \
+                re.search(r"\d\s*" + re.escape(unit), q, re.I):          # also German forms like "60%ige"
+            return True
+    for part in re.split(r";\s*", text):                                 # per part: "left; right" must not cancel
+        if _SIDE.search(part) and _SIDE.search(q) and not laterality_ok(part, quotes):
+            return True
+    return bool(_ANY_DATE.search(text) and _ANY_DATE.search(q) and _ints(text) - have)
+
+
+def _supported_part(value: str, derived: bool, quotes: list[str]) -> str | None:
+    """Keep what the quotes support. Models add context the cited quote doesn't contain ("in 06/2015",
+    "(60% left)", ISO dates). Drop ONLY such pure annotations (numbers/units/dates/side, no other words) and only
+    when the quotes don't state that kind of value at all; then keep the ";"-separated parts that pass every
+    guard. Never trimmed (whole fact rejected instead): values with status/change words (paused, until, reduced,
+    no ...), and anything that conflicts with the quotes (other dose, other side, other date)."""
+    if _guards_ok(value, derived, quotes):
+        return value
+    if _QUALIFIER.search(value) or _conflicts(value, quotes):
+        return None
+    have = set().union(*(_ints(q) for q in quotes))
+
+    def drop(m):
+        t = m.group()
+        unsupported = _ints(t) - have or not laterality_ok(t, quotes)
+        pure = not re.search(r"[a-zäöüß]", _ANNOTATION_WORDS.sub("", t), re.I)
+        return "" if unsupported and pure else t
+
+    v = _EXTRAS.sub(drop, _DATE_BITS.sub("", value))
+    v = re.sub(r"\s{2,}", " ", v).strip(" ,;")
+    if v and _guards_ok(v, derived, quotes):
+        return v
+    parts = [p.strip() for p in re.split(r";\s*", v) if p.strip()]
+    kept = [p for p in parts if _guards_ok(p, derived, quotes)]
+    return "; ".join(kept) or None
+
+
 def _fact(patient: Patient, f: dict, category: str) -> CandidateFact | None:
     srcs = _sources(patient, f.get("sources"))
     value = str(f.get("value") or "").strip()
     if not srcs or not value or _ABSENT.search(value):
         return None                                     # absence is reported via not_documented, never as a fact
     quotes = [" … ".join(s.text for s in verify_quote(patient, s.doc_id, s.quote).spans) for s in srcs]
-    if not _guards_ok(value, bool(f.get("derived")), quotes):
-        # models annotate series with ISO dates ("78 kg (2015-06-28)") that are not in the quotes; the source
-        # document date is shown anyway, so drop those annotations and re-check (all other guards unchanged)
-        value = re.sub(r"\s*\(\s*\d{4}-\d{2}(-\d{2})?\s*\)|\s*\b(on|from|at)?\s*\d{4}-\d{2}-\d{2}\b", "", value).strip(" ,;")
-        if not value or not _guards_ok(value, bool(f.get("derived")), quotes):
-            return None
+    value = _supported_part(value, bool(f.get("derived")), quotes)
+    if not value:
+        return None
     return CandidateFact(category=category, label=str(f.get("label") or category), value=value,
                          date=str(f.get("date") or "") or None, derived=bool(f.get("derived")), sources=srcs)
 
@@ -407,7 +468,9 @@ def contradictions_future(patient: Patient, context: str) -> Future:
     with _contra_lock:
         fut = _contra_cache.get(patient.patient_id)
         if fut is None or (fut.done() and fut.exception()):
+            failed_before = fut is not None
             fut = _contra_cache[patient.patient_id] = _pool.submit(_contradictions, patient, context)
+            fut.no_wait = failed_before         # a retry runs in the background; requests don't wait for it
         return fut
 
 
@@ -422,6 +485,7 @@ def warmup(patient: Patient, context: str, wait: bool = True) -> bool:
             fut.result(timeout=CONTRA_TIMEOUT_S)
         except Exception as e:  # requests still work: rule-based contradictions + retry on next request
             log.warning("contradiction warm-up failed: %s", type(e).__name__)
+            fut.no_wait = True                  # still running or failed: never block requests on it
     return fut.done() and not fut.exception()
 
 
@@ -517,7 +581,12 @@ def reconcile(patient: Patient, needs: list[dict], summary: dict | None, missing
                                                    searched=[str(s) for s in m.get("searched") or []][:8]))
     order = {c: i for i, c in enumerate(n["category"] for n in needs)}
     facts.sort(key=lambda f: order.get(f.category, 99))
-    return facts, not_documented
+    # needs with neither a verified fact nor a "not documented" verdict were not fully analysed (a worker hit the
+    # time limit or failed): say so explicitly instead of implying that nothing is missing
+    answered = {f.category for f in facts} | {m.category for m in not_documented}
+    not_checked = [n["need"] for n in needs if n.get("source") in ("checklist", "planner")
+                   and n["category"] not in answered]
+    return facts, not_documented, not_checked
 
 
 def summarize(patient: Patient, role: str, task: str, context: str) -> CandidateOutput:
@@ -534,13 +603,17 @@ def summarize(patient: Patient, role: str, task: str, context: str) -> Candidate
     summary, missing = f_sum.result(), f_mis.result()       # if one fails, reconcile() uses the other
     t2 = time.perf_counter()
     try:
-        remaining = max(0.1, BUDGET_S - 0.2 - (time.perf_counter() - t0))
+        # wait only for a first computation still in progress; after a failure the retry runs in the background
+        remaining = 0 if getattr(contra_fut, "no_wait", False) else max(0.1, BUDGET_S - 0.2 - (time.perf_counter() - t0))
         contras = contra_fut.result(timeout=remaining)
     except Exception as e:  # still loading or failed: serve the screen (rule-based contradictions still shown)
         log.warning("AI contradictions %s: %s", contradictions_status(patient.patient_id), type(e).__name__)
         contras = []
     t3 = time.perf_counter()
-    facts, not_documented = reconcile(patient, needs, summary, missing)
+    facts, not_documented, not_checked = reconcile(patient, needs, summary, missing)
+    incomplete = [n for n, d in (("summary", summary), ("missing-info", missing)) if d is None or d.get("_partial")]
+    if not_checked:
+        log.warning("analysis incomplete for %d need(s); workers cut off/failed: %s", len(not_checked), incomplete)
     if VERIFY and (facts or contras):
         facts, contras = _verify(facts, contras, f"{role} {task}")
     t4 = time.perf_counter()
@@ -549,4 +622,4 @@ def summarize(patient: Patient, role: str, task: str, context: str) -> Candidate
                         reconcile_verify=round(t4 - t3, 2), total=round(t4 - t0, 2))
     log.info("pipeline %s", last_timings)
     return CandidateOutput(categories=[n["category"] for n in needs], facts=facts,
-                           not_documented=not_documented, contradictions=contras)
+                           not_documented=not_documented, contradictions=contras, not_checked=not_checked)

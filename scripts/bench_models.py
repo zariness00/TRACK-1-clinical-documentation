@@ -638,6 +638,7 @@ def app_eval(patient, ctx, sits, expected, gold) -> None:
         sc = score_runs(patient, recs[-1:], expected, gold)
         print(f"situation {s['id']}: {dt:5.1f}s {dict(ai.last_timings)}  answers {sc['answers_post']}/{len(expected[s['id']])} "
               f"missed {[q for q, ok in sc['answer_detail'].items() if not ok]}  facts {len(f)}  "
+              f"not_checked {len(cand.not_checked)}  "
               f"rejected {[(x.reason, x.item[:50]) for x in rj if x.kind == 'fact']}", flush=True)
     sc = score_runs(patient, recs, expected, gold)
     k = sc["contra"]["post"]
